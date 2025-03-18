@@ -26,21 +26,65 @@ def grad_dist(grads1, grads2, args):
     return ret
 
 
-def get_closest_tokens(inputs_embeds, unused_tokens, embeddings_weight, metric='cos'):
+def get_closest_tokens(inputs_embeds, unused_tokens, embeddings_weight, grads=None, metric='cos'):
+    """
+    Find tokens that are closest to input embeddings, optionally considering gradient direction.
+    
+    Args:
+        inputs_embeds: The current embedding vectors we're optimizing
+        unused_tokens: List of token IDs that should not be considered
+        embeddings_weight: The embedding matrix of the vocabulary
+        grads: Gradients of the loss with respect to inputs_embeds (optional)
+        metric: Distance metric to use ('cos', 'l2', or 'grad_align')
+    
+    Returns:
+        distances: Distance matrix between inputs and vocabulary embeddings
+        token_ids: Token IDs with smallest distance (or highest alignment with gradient)
+    """
     embeddings_weight = embeddings_weight.repeat(inputs_embeds.shape[0], 1, 1)
+    
     if metric == 'l2':
+        # Standard L2 distance
         d = torch.cdist(inputs_embeds, embeddings_weight, p=2)
     elif metric == 'cos':
+        # Standard cosine similarity
         dp = torch.bmm(inputs_embeds, embeddings_weight.transpose(1, 2))
         norm1 = inputs_embeds.norm(p=2, dim=2).unsqueeze(2)
         norm2 = embeddings_weight.norm(p=2, dim=2).unsqueeze(1)
-        d = -dp / (norm1 * norm2)
+        d = -dp / (norm1 * norm2)  # Negative because smaller is better
+    elif metric == 'grad_align' and grads is not None:
+        # Align with gradient descent direction
+        # Calculate directions from current embeddings to each token embedding
+        directions = embeddings_weight - inputs_embeds.unsqueeze(2)  # [batch, seq_len, vocab_size, embed_dim]
+        directions = directions.view(inputs_embeds.shape[0], inputs_embeds.shape[1], -1, inputs_embeds.shape[2])
+        
+        # Normalize directions
+        dir_norms = directions.norm(p=2, dim=3).unsqueeze(3)
+        normalized_directions = directions / (dir_norms + 1e-8)
+        
+        # Normalize gradients (negative for descent direction)
+        grad_norms = grads.norm(p=2, dim=2).unsqueeze(2)
+        normalized_grads = -grads / (grad_norms + 1e-8)  # Negative for descent direction
+        
+        # Compute cosine similarity between directions and gradients
+        # Higher value means better alignment with gradient descent direction
+        alignment = torch.matmul(
+            normalized_directions, 
+            normalized_grads.unsqueeze(3)
+        ).squeeze(3)
+        
+        # Convert to distance-like metric (smaller is better)
+        d = -alignment
     else:
-        assert False
+        assert False, f"Unknown metric {metric} or missing gradients for 'grad_align'"
 
+    # Exclude unused tokens by setting their distance to a large value
+    d = d.clone()  # Ensure we have a copy to modify
     d[:, :, unused_tokens] = 1e9
-    return d, d.min(dim=2)[1]
-
+    
+    # Return distances and indices of minimum distances
+    min_distances, token_indices = d.min(dim=2)
+    return d, token_indices
 
 def get_reconstruction_loss(model, x_embeds, y_labels, true_grads, args, create_graph=False):
     grads = compute_grads(model, x_embeds, y_labels, create_graph=create_graph)
