@@ -185,8 +185,13 @@ def reconstruct(args, device, sample, metric, tokenizer, lm, model):
         lr_scheduler.step()
 
         fix_special_tokens(x_embeds, bert_embeddings.weight, pads)
+
+        opt.zero_grad()
+        rec_loss = get_reconstruction_loss(model, x_embeds, true_labels, true_grads, args, create_graph=True)
+        rec_loss.backward(retain_graph=True)
+        grads = x_embeds.grad.clone()
         
-        _, cos_ids = get_closest_tokens(x_embeds, unused_tokens, bert_embeddings_weight)
+        _, cos_ids = get_closest_tokens(x_embeds, unused_tokens, bert_embeddings_weight,grads=grads,metric='grad_align')
         
         # Trying swaps
         if args.use_swaps and it >= args.swap_burnin * args.n_steps and it % args.swap_every == 1:
@@ -273,7 +278,7 @@ def main():
     model = AutoModelForSequenceClassification.from_pretrained(args.bert_path).to(device)
     model.eval()
     
-    tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased', use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained("./models/bert-base-uncased", use_fast=True)
     tokenizer.model_max_length = 512
 
     print('\n\nAttacking..\n', flush=True)
